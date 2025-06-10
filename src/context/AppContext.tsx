@@ -1,0 +1,200 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Chat, Message, Wallet, CreateWalletData } from '../types';
+import { User } from '../types/user';
+import { chatService } from '../services/chatService';
+import { messageService } from '../services/messageService';
+import { walletService } from '../services/walletService';
+
+const isLocalStorageAvailable = () => {
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch {
+    return false;
+  }
+};
+
+interface AppContextType {
+  currentUser: User | null;
+  chats: Chat[];
+  messages: Message[];
+  isLoading: boolean;
+  error: string | null;
+  chatsLoading: boolean;
+  chatsError: string | null;
+  login: (user: User) => Promise<void>;
+  logout: () => Promise<void>;
+  refreshChats: () => Promise<void>;
+  createChat: (data: Omit<Chat, 'id' | 'created_at' | 'updated_at'>) => Promise<Chat>;
+  sendMessage: (data: { chatId: string; content: string; type: 'text' | 'image' | 'file' }) => Promise<Message>;
+  createWallet: (data: CreateWalletData) => Promise<Wallet>;
+}
+
+const AppContext = createContext<AppContextType | undefined>(undefined);
+
+export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [chatsLoading, setChatsLoading] = useState(false);
+  const [chatsError, setChatsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadUser();
+  }, []);
+
+  const loadUser = async () => {
+    try {
+      let userJson: string | null = null;
+      if (Platform.OS === 'web' && isLocalStorageAvailable()) {
+        userJson = window.localStorage.getItem('user');
+      } else {
+        userJson = await AsyncStorage.getItem('user');
+      }
+      
+      if (userJson) {
+        const user = JSON.parse(userJson);
+        setCurrentUser(user);
+        await refreshChats();
+      }
+    } catch (error) {
+      console.error('Error loading user:', error);
+      setError('Failed to load user data');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const login = async (user: User) => {
+    try {
+      if (Platform.OS === 'web' && isLocalStorageAvailable()) {
+        window.localStorage.setItem('user', JSON.stringify(user));
+      } else {
+        await AsyncStorage.setItem('user', JSON.stringify(user));
+      }
+      setCurrentUser(user);
+      await refreshChats();
+    } catch (error) {
+      console.error('Error logging in:', error);
+      setError('Failed to log in');
+    }
+  };
+
+  const logout = async () => {
+    try {
+      if (Platform.OS === 'web' && isLocalStorageAvailable()) {
+        window.localStorage.removeItem('user');
+      } else {
+        await AsyncStorage.removeItem('user');
+      }
+      setCurrentUser(null);
+      setChats([]);
+      setMessages([]);
+    } catch (error) {
+      console.error('Error logging out:', error);
+      setError('Failed to log out');
+    }
+  };
+
+  const refreshChats = async () => {
+    if (!currentUser) return;
+
+    try {
+      setChatsLoading(true);
+      setChatsError(null);
+      const userChats = await chatService.getChats();
+      setChats(userChats);
+    } catch (error) {
+      console.error('Error refreshing chats:', error);
+      setChatsError('Failed to refresh chats');
+    } finally {
+      setChatsLoading(false);
+    }
+  };
+
+  const createChat = async (data: Omit<Chat, 'id' | 'created_at' | 'updated_at'>) => {
+    if (!currentUser) throw new Error('User not logged in');
+
+    try {
+      console.log('Creating new chat in AppContext:', data);
+      const newChat = await chatService.createChat(data);
+      console.log('Chat created in AppContext:', newChat);
+      
+      // Refresh chats to ensure we have the latest data
+      await refreshChats();
+      
+      return newChat;
+    } catch (error) {
+      console.error('Error creating chat:', error);
+      setError('Failed to create chat');
+      throw error;
+    }
+  };
+
+  const sendMessage = async (data: { chatId: string; content: string; type: 'text' | 'image' | 'file' }) => {
+    if (!currentUser) throw new Error('User not logged in');
+
+    try {
+      const newMessage = await messageService.createMessage({
+        chatId: data.chatId,
+        senderId: currentUser.id,
+        content: data.content,
+        type: data.type
+      });
+      setMessages(prevMessages => [...prevMessages, newMessage]);
+      return newMessage;
+    } catch (error) {
+      console.error('Error sending message:', error);
+      setError('Failed to send message');
+      throw error;
+    }
+  };
+
+  const createWallet = async (data: CreateWalletData): Promise<Wallet> => {
+    if (!currentUser) throw new Error('User not logged in');
+
+    try {
+      const wallet = await walletService.createWallet({
+        ...data,
+        members: data.members || [currentUser],
+      });
+      return wallet;
+    } catch (error) {
+      console.error('Error creating wallet:', error);
+      throw error;
+    }
+  };
+
+  return (
+    <AppContext.Provider
+      value={{
+        currentUser,
+        chats,
+        messages,
+        isLoading,
+        error,
+        chatsLoading,
+        chatsError,
+        login,
+        logout,
+        refreshChats,
+        createChat,
+        sendMessage,
+        createWallet
+      }}
+    >
+      {children}
+    </AppContext.Provider>
+  );
+};
+
+export const useApp = () => {
+  const context = useContext(AppContext);
+  if (context === undefined) {
+    throw new Error('useApp must be used within an AppProvider');
+  }
+  return context;
+}; 
